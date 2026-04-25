@@ -35,6 +35,8 @@ try:
 except ImportError:
     _YF_AVAILABLE = False
 
+import logging as _log
+
 # ---------------------------------------------------------------------------
 # Timeframe mappings
 # ---------------------------------------------------------------------------
@@ -107,10 +109,92 @@ def _rates_to_df(rates) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
-# yfinance helpers
+# Linux / cloud fallback helpers
 # ---------------------------------------------------------------------------
+
+# ── Alpha Vantage (OHLCV, free tier, needs ALPHA_VANTAGE_API_KEY env var) ──
+_AV_BASE    = "https://www.alphavantage.co/query"
+_AV_TF_MAP  = {
+    "M1":  ("FX_INTRADAY", "1min"),
+    "M5":  ("FX_INTRADAY", "5min"),
+    "M15": ("FX_INTRADAY", "15min"),
+    "M30": ("FX_INTRADAY", "30min"),
+    "H1":  ("FX_INTRADAY", "60min"),
+    "H4":  ("FX_INTRADAY", "60min"),   # no 4h in AV; caller uses every 4th
+    "D1":  ("FX_DAILY",    None),
+}
+
+
+def _av_ohlcv(symbol: str, timeframe: str, bars: int) -> pd.DataFrame:
+    """Fetch OHLCV from Alpha Vantage. Requires ALPHA_VANTAGE_API_KEY env var."""
+    import os
+    api_key = os.getenv("ALPHA_VANTAGE_API_KEY", "")
+    if not api_key:
+        raise RuntimeError(
+            "ALPHA_VANTAGE_API_KEY not set — add it to Railway Variables. "
+            "Get a free key at alphavantage.co/support/#api-key"
+        )
+
+    sym = symbol.upper()
+    from_cur = sym[:3]
+    to_cur   = sym[3:]
+    tf_upper = timeframe.upper()
+    func, interval = _AV_TF_MAP.get(tf_upper, ("FX_INTRADAY", "60min"))
+
+    params: dict = {
+        "function":    func,
+        "from_symbol": from_cur,
+        "to_symbol":   to_cur,
+        "outputsize":  "full",
+        "apikey":      api_key,
+    }
+    if interval:
+        params["interval"] = interval
+
+    resp = requests.get(_AV_BASE, params=params, timeout=15)
+    resp.raise_for_status()
+    data = resp.json()
+
+    # Find the time series key (varies by function)
+    ts_key = next((k for k in data if "Time Series" in k), None)
+    if not ts_key or not data.get(ts_key):
+        note = data.get("Note") or data.get("Information") or str(data)[:200]
+        raise ValueError(f"Alpha Vantage returned no data: {note}")
+
+    rows = []
+    for ts, v in data[ts_key].items():
+        rows.append({
+            "time":   pd.Timestamp(ts, tz="UTC"),
+            "open":   float(v.get("1. open",  v.get("1a. open (USD)", 0))),
+            "high":   float(v.get("2. high",  v.get("2a. high (USD)", 0))),
+            "low":    float(v.get("3. low",   v.get("3a. low (USD)",  0))),
+            "close":  float(v.get("4. close", v.get("4a. close (USD)",0))),
+            "volume": float(v.get("5. volume", 0)),
+        })
+
+    df = pd.DataFrame(rows).sort_values("time").reset_index(drop=True)
+    return df.tail(bars)[_OHLCV_COLS].reset_index(drop=True)
+
+
+# ── Frankfurter (current spot price only, no API key needed) ───────────────
+def _frankfurter_price(symbol: str) -> float:
+    """Return current mid price for e.g. 'EURUSD' via api.frankfurter.app."""
+    sym      = symbol.upper()
+    from_cur = sym[:3]
+    to_cur   = sym[3:]
+    resp = requests.get(
+        f"https://api.frankfurter.app/latest?from={from_cur}&to={to_cur}",
+        timeout=8,
+    )
+    resp.raise_for_status()
+    rate = resp.json()["rates"].get(to_cur)
+    if rate is None:
+        raise ValueError(f"Frankfurter: no rate for {symbol}")
+    return float(rate)
+
+
+# ── yfinance (kept as last resort, often blocked on cloud IPs) ─────────────
 def _yf_symbol(symbol: str) -> str:
-    """Convert MT5-style 'EURUSD' → yfinance 'EURUSD=X'."""
     if symbol.upper() in ("EURUSD", "GBPUSD", "USDJPY", "USDCHF",
                           "AUDUSD", "NZDUSD", "USDCAD"):
         return symbol.upper() + "=X"
@@ -119,7 +203,7 @@ def _yf_symbol(symbol: str) -> str:
 
 def _yf_ohlcv(symbol: str, timeframe: str, bars: int) -> pd.DataFrame:
     if not _YF_AVAILABLE:
-        raise RuntimeError("yfinance is not installed — cannot fetch data on Linux")
+        raise RuntimeError("yfinance not installed")
 
     tf_str = _YF_INTERVALS.get(timeframe.upper(), "1h")
     period = _YF_PERIODS.get(timeframe.upper(), "30d")
@@ -139,14 +223,35 @@ def _yf_ohlcv(symbol: str, timeframe: str, bars: int) -> pd.DataFrame:
     df["close"]  = df_raw["Close"].values
     df["volume"] = df_raw["Volume"].values
 
-    # Ensure time is timezone-aware UTC
     if df["time"].dt.tz is None:
         df["time"] = df["time"].dt.tz_localize("UTC")
     else:
         df["time"] = df["time"].dt.tz_convert("UTC")
 
-    df = df.tail(bars).reset_index(drop=True)
-    return df[_OHLCV_COLS].copy()
+    return df.tail(bars).reset_index(drop=True)[_OHLCV_COLS].copy()
+
+
+def _cloud_ohlcv(symbol: str, timeframe: str, bars: int) -> pd.DataFrame:
+    """
+    Try Alpha Vantage first, then yfinance.
+    Logs a single clear warning instead of spamming on every failure.
+    """
+    import os
+    if os.getenv("ALPHA_VANTAGE_API_KEY"):
+        return _av_ohlcv(symbol, timeframe, bars)
+
+    # Fall back to yfinance with suppressed noise
+    try:
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            return _yf_ohlcv(symbol, timeframe, bars)
+    except Exception as exc:
+        raise ValueError(
+            f"No OHLCV data available on Railway. "
+            f"Add ALPHA_VANTAGE_API_KEY to Railway Variables for live data. "
+            f"(yfinance error: {exc})"
+        ) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -173,8 +278,8 @@ def get_ohlcv(
             )
         return _rates_to_df(rates)
 
-    # Linux / yfinance fallback
-    return _yf_ohlcv(symbol, timeframe, bars)
+    # Linux / cloud fallback (Alpha Vantage → yfinance)
+    return _cloud_ohlcv(symbol, timeframe, bars)
 
 
 def get_current_price(symbol: str) -> dict:
@@ -196,17 +301,24 @@ def get_current_price(symbol: str) -> dict:
             "time":   pd.Timestamp(tick.time, unit="s", tz="UTC"),
         }
 
-    # Linux / yfinance fallback
-    if not _YF_AVAILABLE:
-        raise RuntimeError("yfinance not installed")
+    # Linux / cloud fallback — use Frankfurter for current spot price
+    try:
+        price = _frankfurter_price(symbol)
+    except Exception:
+        # Last resort: try yfinance
+        if _YF_AVAILABLE:
+            import warnings
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                yf_sym = _yf_symbol(symbol)
+                df = yf.Ticker(yf_sym).history(period="1d", interval="1m", auto_adjust=True)
+            if df is not None and not df.empty:
+                price = float(df["Close"].iloc[-1])
+            else:
+                raise ValueError(f"Cannot get current price for {symbol} on Railway")
+        else:
+            raise
 
-    yf_sym = _yf_symbol(symbol)
-    ticker = yf.Ticker(yf_sym)
-    df = ticker.history(period="1d", interval="1m", auto_adjust=True)
-    if df is None or df.empty:
-        raise ValueError(f"yfinance returned no tick data for {yf_sym}")
-
-    price = float(df["Close"].iloc[-1])
     return {
         "bid":    price,
         "ask":    price,
