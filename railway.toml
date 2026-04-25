@@ -1,8 +1,10 @@
 [build]
 builder = "nixpacks"
+buildCommand = "chmod +x start.sh"
 
 [deploy]
-restartPolicyType = "on_failure"
-restartPolicyMaxRetries = 5
-healthcheckPath = "/health"
-healthcheckTimeout = 30
+restartPolicyType = "always"
+restartPolicyMaxRetries = 10
+startCommand = "bash start.sh"
+healthcheckPath = "/_stcore/health"
+healthcheckTimeout = 60
