@@ -1,0 +1,53 @@
+══════════════════════════════════════════════════════════════════
+  Railway Environment Variables — EUR/USD Forex Bot
+══════════════════════════════════════════════════════════════════
+
+Set these in Railway → Project → Variables before deploying.
+
+──────────────────────────────────────────────────────────────────
+REQUIRED
+──────────────────────────────────────────────────────────────────
+
+NEON_DATABASE_URL
+  Full PostgreSQL connection string from Neon console.
+  Example: postgresql://user:pass@ep-xyz.us-east-2.aws.neon.tech/neondb?sslmode=require
+
+DASHBOARD_PASSWORD
+  Password to protect the Streamlit dashboard.
+  Leave empty to disable the password gate (not recommended for production).
+  Example: my_secure_password_123
+
+──────────────────────────────────────────────────────────────────
+OPTIONAL — MT5 (Windows only, Railway runs Linux so these are
+           unused on Railway but needed for local Windows runs)
+──────────────────────────────────────────────────────────────────
+
+MT5_LOGIN
+  Your MetaTrader 5 account number (integer).
+  Example: 123456789
+
+MT5_PASSWORD
+  Your MT5 account password.
+  Example: TraderPass!99
+
+MT5_SERVER
+  Broker server name from the MT5 terminal.
+  Example: ICMarkets-Demo
+
+──────────────────────────────────────────────────────────────────
+NOTES
+──────────────────────────────────────────────────────────────────
+
+• On Railway (Linux), MT5 is unavailable — the bot auto-activates
+  PAPER MODE and logs all simulated trades to Neon DB.
+
+• The dashboard reads directly from Neon DB and does NOT require
+  MT5, so it works on Railway without the MT5 credentials.
+
+• To deploy two separate services (bot + dashboard), create two
+  Railway services in the same project pointing to this repo,
+  and override the start command:
+    Bot service:       python main.py
+    Dashboard service: streamlit run dashboard/app.py --server.port $PORT --server.address 0.0.0.0
+
+══════════════════════════════════════════════════════════════════
