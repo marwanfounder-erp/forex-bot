@@ -124,7 +124,11 @@ def _init():
     news    = NewsFilter()
     return db, logger, perf, news
 
-DB, LOGGER, PERF, NEWS = _init()
+try:
+    DB, LOGGER, PERF, NEWS = _init()
+except Exception as _db_err:
+    st.error(f"DB connection failed: {_db_err}")
+    st.stop()
 
 # ─────────────────────────────────────────────────────────────
 # Cached DB queries  (TTL = 30 s)

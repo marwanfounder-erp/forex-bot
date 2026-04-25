@@ -1,11 +1,15 @@
 #!/bin/bash
+set -e
 
-# Start the bot in the background
+echo "Starting EUR/USD Forex Bot..."
 python main.py &
+BOT_PID=$!
+echo "Bot started with PID $BOT_PID"
 
-# Start the Streamlit dashboard in the foreground
-# Railway needs one process in foreground to stay alive
-streamlit run dashboard/app.py \
-  --server.port $PORT \
+echo "Starting Streamlit Dashboard..."
+exec streamlit run dashboard/app.py \
+  --server.port ${PORT:-8501} \
   --server.address 0.0.0.0 \
-  --server.headless true
+  --server.headless true \
+  --server.enableCORS false \
+  --server.enableXsrfProtection false
