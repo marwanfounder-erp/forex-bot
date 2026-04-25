@@ -48,7 +48,7 @@ RISK = {
 # ---------------------------------------------------------------------------
 # MT5 credentials (loaded from .env)
 # ---------------------------------------------------------------------------
-MT5_LOGIN    = int(os.getenv("MT5_LOGIN", "0"))
+MT5_LOGIN    = int(os.getenv("MT5_LOGIN") or "0")
 MT5_PASSWORD = os.getenv("MT5_PASSWORD", "")
 MT5_SERVER   = os.getenv("MT5_SERVER", "")
 

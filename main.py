@@ -16,6 +16,7 @@ import sys
 import time
 from datetime import date, datetime
 
+import threading
 import schedule
 import pytz
 from dotenv import load_dotenv
@@ -51,6 +52,32 @@ class MT5DataFeed:
     """Thin wrapper so StrategyRouter can call .get_ohlcv(...)."""
     def get_ohlcv(self, symbol, timeframe, bars=200):
         return get_ohlcv(symbol, timeframe, bars)
+
+
+# ── Background health-check server (Railway liveness probe) ──────────────────
+def _start_health_server() -> None:
+    """Spin up a minimal HTTP server on PORT (default 8080) for Railway health checks."""
+    import os
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    port = int(os.getenv("PORT", "8080"))
+
+    class _Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            body = b'{"status":"ok"}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass  # silence access logs
+
+    server = HTTPServer(("0.0.0.0", port), _Handler)
+    t = threading.Thread(target=server.serve_forever, daemon=True)
+    t.start()
+    log.info("[BOT] Health server listening on port %d", port)
 
 
 EST = pytz.timezone("America/New_York")
@@ -220,6 +247,9 @@ def main() -> None:
     if args.dry_run:
         log.info("  MODE: DRY-RUN (%d ticks)", args.ticks)
     log.info("=" * 62)
+
+    # Start health-check server (Railway liveness probe)
+    _start_health_server()
 
     # Init DB schema (idempotent)
     database.init_db()
