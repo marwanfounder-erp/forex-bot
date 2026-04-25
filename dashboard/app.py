@@ -9,11 +9,13 @@ Run:  streamlit run dashboard/app.py
 """
 from __future__ import annotations
 
-import sys, os, io, math
+import os
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import io, math
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 import pandas as pd
 import plotly.graph_objects as go
