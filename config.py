@@ -48,8 +48,9 @@ RISK = {
 # ---------------------------------------------------------------------------
 # External API keys
 # ---------------------------------------------------------------------------
-NEWS_API_KEY          = os.getenv("NEWS_API_KEY", "")
-ALPHA_VANTAGE_API_KEY = os.getenv("ALPHA_VANTAGE_API_KEY", "")
+NEWS_API_KEY       = os.getenv("NEWS_API_KEY", "")
+ALPACA_API_KEY     = os.getenv("ALPACA_API_KEY", "")
+ALPACA_SECRET_KEY  = os.getenv("ALPACA_SECRET_KEY", "")
 
 # ---------------------------------------------------------------------------
 # Database (Neon PostgreSQL)

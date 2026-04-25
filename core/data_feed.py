@@ -1,16 +1,17 @@
 """
 core/data_feed.py
-Market data feed — cloud-native, no MT5.
+Market data feed — Alpaca v1beta3 forex REST API (primary)
+                   + Frankfurter (fallback for current price).
 
-PRIMARY  : Alpha Vantage (OHLCV candles) via ALPHA_VANTAGE_API_KEY
-FALLBACK : Frankfurter API (current price only, no key needed, always works)
+PRIMARY  : Alpaca forex bars endpoint — real OHLCV candles, free tier,
+           works on Linux/Railway. Needs ALPACA_API_KEY + ALPACA_SECRET_KEY.
+FALLBACK : Frankfurter — current spot price only, no key needed, always works.
 """
 
 from __future__ import annotations
 
 import logging
-import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 import requests
@@ -19,70 +20,134 @@ import config
 
 log = logging.getLogger(__name__)
 
-_AV_BASE   = "https://www.alphavantage.co/query"
-_AV_TF_MAP = {
-    "M1":  ("FX_INTRADAY", "1min"),
-    "M5":  ("FX_INTRADAY", "5min"),
-    "M15": ("FX_INTRADAY", "15min"),
-    "M30": ("FX_INTRADAY", "30min"),
-    "H1":  ("FX_INTRADAY", "60min"),
-    "H4":  ("FX_INTRADAY", "60min"),   # no 4h in AV; caller uses every 4th row if needed
-    "D1":  ("FX_DAILY",    None),
+_OHLCV_COLS = ["time", "open", "high", "low", "close", "volume"]
+
+_ALPACA_DATA_BASE = "https://data.alpaca.markets"
+
+# Alpaca v1beta3 timeframe strings
+_TF_MAP: dict[str, str] = {
+    "M1":  "1Min",
+    "M5":  "5Min",
+    "M15": "15Min",
+    "M30": "30Min",
+    "H1":  "1Hour",
+    "H4":  "4Hour",
+    "D1":  "1Day",
 }
 
-_OHLCV_COLS = ["time", "open", "high", "low", "close", "volume"]
+# Minutes per bar — used to compute lookback window
+_TF_MINUTES: dict[str, int] = {
+    "M1": 1, "M5": 5, "M15": 15, "M30": 30,
+    "H1": 60, "H4": 240, "D1": 1440,
+}
 
 
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _av_ohlcv(symbol: str, timeframe: str, bars: int) -> pd.DataFrame:
-    """Fetch OHLCV candles from Alpha Vantage. Requires ALPHA_VANTAGE_API_KEY."""
-    api_key = os.getenv("ALPHA_VANTAGE_API_KEY", "")
-    if not api_key:
+def _alpaca_headers() -> dict:
+    """Build Alpaca auth headers from config/env."""
+    return {
+        "APCA-API-KEY-ID":     config.ALPACA_API_KEY,
+        "APCA-API-SECRET-KEY": config.ALPACA_SECRET_KEY,
+        "Accept":              "application/json",
+    }
+
+
+def _alpaca_symbol(symbol: str) -> str:
+    """Convert 'EURUSD' → 'EUR/USD' for Alpaca."""
+    s = symbol.upper()
+    if "/" not in s and len(s) == 6:
+        return f"{s[:3]}/{s[3:]}"
+    return s
+
+
+def _alpaca_tf(timeframe: str) -> str:
+    tf = _TF_MAP.get(timeframe.upper())
+    if tf is None:
+        raise ValueError(
+            f"Unknown timeframe '{timeframe}'. Valid: {list(_TF_MAP.keys())}"
+        )
+    return tf
+
+
+def _alpaca_ohlcv(symbol: str, timeframe: str, bars: int) -> pd.DataFrame:
+    """
+    Fetch OHLCV bars from Alpaca v1beta3 forex endpoint.
+    Requires ALPACA_API_KEY + ALPACA_SECRET_KEY.
+    """
+    if not config.ALPACA_API_KEY or not config.ALPACA_SECRET_KEY:
         raise RuntimeError(
-            "ALPHA_VANTAGE_API_KEY not set — add it to Railway Variables. "
-            "Get a free key at alphavantage.co/support/#api-key"
+            "ALPACA_API_KEY and ALPACA_SECRET_KEY must be set. "
+            "Add them to Railway Variables (free at alpaca.markets)."
         )
 
-    sym      = symbol.upper()
-    from_cur = sym[:3]
-    to_cur   = sym[3:]
-    func, interval = _AV_TF_MAP.get(timeframe.upper(), ("FX_INTRADAY", "60min"))
+    alpaca_sym = _alpaca_symbol(symbol)
+    tf_str     = _alpaca_tf(timeframe)
 
-    params: dict = {
-        "function":    func,
-        "from_symbol": from_cur,
-        "to_symbol":   to_cur,
-        "outputsize":  "full",
-        "apikey":      api_key,
+    # Build start time wide enough to cover `bars` candles with gaps/weekends
+    lookback = bars * _TF_MINUTES.get(timeframe.upper(), 60) * 2
+    start    = datetime.now(timezone.utc) - timedelta(minutes=lookback)
+
+    params = {
+        "symbols":   alpaca_sym,
+        "timeframe": tf_str,
+        "start":     start.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "limit":     min(bars, 10_000),
+        "sort":      "asc",
     }
-    if interval:
-        params["interval"] = interval
 
-    resp = requests.get(_AV_BASE, params=params, timeout=15)
-    resp.raise_for_status()
+    resp = requests.get(
+        f"{_ALPACA_DATA_BASE}/v1beta3/forex/bars",
+        headers=_alpaca_headers(),
+        params=params,
+        timeout=15,
+    )
+    _raise_for_alpaca(resp)
     data = resp.json()
 
-    ts_key = next((k for k in data if "Time Series" in k), None)
-    if not ts_key or not data.get(ts_key):
-        note = data.get("Note") or data.get("Information") or str(data)[:200]
-        raise ValueError(f"Alpha Vantage returned no data: {note}")
+    bar_list = data.get("bars", {}).get(alpaca_sym, [])
+    if not bar_list:
+        raise ValueError(
+            f"Alpaca returned no bars for {symbol} {timeframe}. "
+            "Check that the market is not closed and your API keys are valid."
+        )
 
-    rows = []
-    for ts, v in data[ts_key].items():
-        rows.append({
-            "time":   pd.Timestamp(ts, tz="UTC"),
-            "open":   float(v.get("1. open",  v.get("1a. open (USD)",  0))),
-            "high":   float(v.get("2. high",  v.get("2a. high (USD)",  0))),
-            "low":    float(v.get("3. low",   v.get("3a. low (USD)",   0))),
-            "close":  float(v.get("4. close", v.get("4a. close (USD)", 0))),
-            "volume": float(v.get("5. volume", 0)),
-        })
+    rows = [
+        {
+            "time":   pd.Timestamp(b["t"], tz="UTC"),
+            "open":   float(b["o"]),
+            "high":   float(b["h"]),
+            "low":    float(b["l"]),
+            "close":  float(b["c"]),
+            "volume": float(b.get("v", 0)),
+        }
+        for b in bar_list
+    ]
 
     df = pd.DataFrame(rows).sort_values("time").reset_index(drop=True)
     return df.tail(bars)[_OHLCV_COLS].reset_index(drop=True)
+
+
+def _alpaca_latest_price(symbol: str) -> float:
+    """Return the close of the most recent Alpaca forex bar."""
+    if not config.ALPACA_API_KEY or not config.ALPACA_SECRET_KEY:
+        raise RuntimeError("Alpaca API keys not set")
+
+    alpaca_sym = _alpaca_symbol(symbol)
+    resp = requests.get(
+        f"{_ALPACA_DATA_BASE}/v1beta3/forex/latest/bars",
+        headers=_alpaca_headers(),
+        params={"symbols": alpaca_sym},
+        timeout=10,
+    )
+    _raise_for_alpaca(resp)
+    data = resp.json()
+    bar  = data.get("bars", {}).get(alpaca_sym)
+    if bar is None:
+        raise ValueError(f"Alpaca: no latest bar for {symbol}")
+    return float(bar["c"])
 
 
 def _frankfurter_price(symbol: str) -> float:
@@ -101,8 +166,19 @@ def _frankfurter_price(symbol: str) -> float:
     return float(rate)
 
 
+def _raise_for_alpaca(resp: requests.Response) -> None:
+    """Raise a clear error if the Alpaca response is not 2xx."""
+    if resp.ok:
+        return
+    try:
+        msg = resp.json().get("message", resp.text[:200])
+    except Exception:
+        msg = resp.text[:200]
+    raise RuntimeError(f"Alpaca API error {resp.status_code}: {msg}")
+
+
 # ---------------------------------------------------------------------------
-# Public API  (signatures unchanged — drop-in replacement for old MT5 feed)
+# Public API  (signatures unchanged — drop-in replacement)
 # ---------------------------------------------------------------------------
 
 def get_ohlcv(
@@ -113,26 +189,26 @@ def get_ohlcv(
     """
     Fetch the most recent `bars` candles for `symbol` at `timeframe`.
 
-    Uses Alpha Vantage (requires ALPHA_VANTAGE_API_KEY).
+    Uses Alpaca v1beta3 forex REST API.
     Returns pd.DataFrame with columns: time, open, high, low, close, volume.
     """
-    df = _av_ohlcv(symbol, timeframe, bars)
-    log.debug("Alpha Vantage: %d %s candles for %s", len(df), timeframe, symbol)
+    df = _alpaca_ohlcv(symbol, timeframe, bars)
+    log.debug("Alpaca: %d %s bars for %s", len(df), timeframe, symbol)
     return df
 
 
 def get_current_price(symbol: str) -> dict:
     """
-    Return the latest bid, ask, and spread for `symbol`.
+    Return the latest price for `symbol`.
 
-    Primary: Frankfurter (free, always works, no key).
-    Fallback: Alpha Vantage last close from M5 candle.
+    Primary:  Alpaca latest forex bar close.
+    Fallback: Frankfurter API (no key, always works).
 
     Returns {"bid": float, "ask": float, "spread": float, "time": Timestamp}.
     """
     try:
-        price = _frankfurter_price(symbol)
-        log.debug("Frankfurter price %s: %.5f", symbol, price)
+        price = _alpaca_latest_price(symbol)
+        log.debug("Alpaca latest bar %s: %.5f", symbol, price)
         return {
             "bid":    price,
             "ask":    price,
@@ -140,11 +216,10 @@ def get_current_price(symbol: str) -> dict:
             "time":   pd.Timestamp.now(tz="UTC"),
         }
     except Exception as exc:
-        log.warning("Frankfurter failed (%s) — falling back to Alpha Vantage", exc)
+        log.warning("Alpaca price failed (%s) — falling back to Frankfurter", exc)
 
-    # Fallback: last close from Alpha Vantage
-    df    = _av_ohlcv(symbol, "M5", 1)
-    price = float(df["close"].iloc[-1])
+    price = _frankfurter_price(symbol)
+    log.debug("Frankfurter fallback %s: %.5f", symbol, price)
     return {
         "bid":    price,
         "ask":    price,
@@ -161,12 +236,45 @@ def get_candles_range(
 ) -> pd.DataFrame:
     """
     Fetch candles between from_time and to_time (timezone-aware datetimes).
-    Uses Alpha Vantage full output and filters by time range.
+    Uses Alpaca v1beta3 forex REST API with explicit start/end.
     """
-    df   = _av_ohlcv(symbol, timeframe, 2000)
-    mask = (df["time"] >= pd.Timestamp(from_time, tz="UTC")) & \
-           (df["time"] <= pd.Timestamp(to_time,   tz="UTC"))
-    return df[mask].reset_index(drop=True)
+    if not config.ALPACA_API_KEY or not config.ALPACA_SECRET_KEY:
+        raise RuntimeError("ALPACA_API_KEY and ALPACA_SECRET_KEY must be set")
+
+    alpaca_sym = _alpaca_symbol(symbol)
+    tf_str     = _alpaca_tf(timeframe)
+
+    params = {
+        "symbols":   alpaca_sym,
+        "timeframe": tf_str,
+        "start":     from_time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "end":       to_time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "limit":     10_000,
+        "sort":      "asc",
+    }
+
+    resp = requests.get(
+        f"{_ALPACA_DATA_BASE}/v1beta3/forex/bars",
+        headers=_alpaca_headers(),
+        params=params,
+        timeout=15,
+    )
+    _raise_for_alpaca(resp)
+    data     = resp.json()
+    bar_list = data.get("bars", {}).get(alpaca_sym, [])
+
+    rows = [
+        {
+            "time":   pd.Timestamp(b["t"], tz="UTC"),
+            "open":   float(b["o"]),
+            "high":   float(b["h"]),
+            "low":    float(b["l"]),
+            "close":  float(b["c"]),
+            "volume": float(b.get("v", 0)),
+        }
+        for b in bar_list
+    ]
+    return pd.DataFrame(rows)[_OHLCV_COLS] if rows else pd.DataFrame(columns=_OHLCV_COLS)
 
 
 def get_account_balance() -> float:
