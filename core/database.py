@@ -16,13 +16,14 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import DeclarativeBase, Session
-from sqlalchemy.pool import NullPool
 from dotenv import load_dotenv
 
 load_dotenv()
 
 # ---------------------------------------------------------------------------
-# Engine — NullPool keeps serverless Neon connections clean
+# Engine — pool_pre_ping tests the connection before every checkout so stale
+# SSL connections (Neon idles out in ~5 min) are replaced transparently.
+# pool_recycle forces a new connection after 4 min to stay under that limit.
 # ---------------------------------------------------------------------------
 _DATABASE_URL: str = os.getenv("NEON_DATABASE_URL", "")
 
@@ -34,7 +35,17 @@ if not _DATABASE_URL:
 
 engine = create_engine(
     _DATABASE_URL,
-    poolclass=NullPool,   # recommended for serverless / edge Neon connections
+    pool_pre_ping   = True,   # SELECT 1 before checkout — replaces dead connections
+    pool_recycle    = 240,    # recycle connections every 4 min (Neon idles at ~5 min)
+    pool_size       = 3,
+    max_overflow    = 2,
+    connect_args    = {
+        "keepalives":          1,
+        "keepalives_idle":     30,   # seconds before sending keepalive probe
+        "keepalives_interval": 10,   # seconds between probes
+        "keepalives_count":    5,    # probes before declaring connection dead
+        "connect_timeout":     10,
+    },
     echo=False,
 )
 

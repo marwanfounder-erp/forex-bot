@@ -24,7 +24,7 @@ import streamlit as st
 from sqlalchemy import text
 
 import config
-from core.database        import init_db, get_session
+from core.database        import init_db, get_session, engine
 from core.session_manager import get_session_info, is_market_open
 from core.news_filter     import NewsFilter
 from analytics.trade_logger  import TradeLogger
@@ -116,44 +116,59 @@ st.markdown(f"""
 
 # ─────────────────────────────────────────────────────────────
 # Shared initialisation (cached across reruns)
+# Only NewsFilter is cached — DB sessions are short-lived per query.
 # ─────────────────────────────────────────────────────────────
 @st.cache_resource
 def _init():
     init_db()
-    db      = get_session()
-    logger  = TradeLogger(db_session=db)
-    perf    = PerformanceAnalyzer(db_session=db)
-    news    = NewsFilter()
-    return db, logger, perf, news
+    return NewsFilter()
 
 try:
-    DB, LOGGER, PERF, NEWS = _init()
+    NEWS = _init()
 except Exception as _db_err:
     st.error(f"DB connection failed: {_db_err}")
     st.stop()
 
 # ─────────────────────────────────────────────────────────────
+# Raw SQL helper — fresh connection per call, auto-closed
+# ─────────────────────────────────────────────────────────────
+def _kill_active() -> bool:
+    """Check kill switch using a fresh connection (never stale)."""
+    with engine.connect() as conn:
+        row = conn.execute(
+            text("SELECT kill_switch_triggered FROM daily_summary WHERE date=CURRENT_DATE")
+        ).fetchone()
+    return bool(row and row[0])
+
+# ─────────────────────────────────────────────────────────────
 # Cached DB queries  (TTL = 30 s)
+# Each function opens and closes its own session — no long-lived
+# connection held between Streamlit reruns.
 # ─────────────────────────────────────────────────────────────
 @st.cache_data(ttl=30)
 def _comparison() -> list[dict]:
-    return PERF.get_all_strategies_comparison()
+    with get_session() as db:
+        return PerformanceAnalyzer(db_session=db).get_all_strategies_comparison()
 
 @st.cache_data(ttl=30)
 def _recent(limit: int = 50, strategy: Optional[str] = None) -> list[dict]:
-    return PERF.get_recent_trades(limit=limit, strategy=strategy or None)
+    with get_session() as db:
+        return PerformanceAnalyzer(db_session=db).get_recent_trades(limit=limit, strategy=strategy or None)
 
 @st.cache_data(ttl=30)
 def _open_trades() -> list[dict]:
-    return LOGGER.get_open_db_trades()
+    with get_session() as db:
+        return TradeLogger(db_session=db).get_open_db_trades()
 
 @st.cache_data(ttl=30)
 def _today_summary() -> dict:
-    return PERF.get_daily_summary(date.today())
+    with get_session() as db:
+        return PerformanceAnalyzer(db_session=db).get_daily_summary(date.today())
 
 @st.cache_data(ttl=30)
 def _all_trades(limit: int = 500) -> list[dict]:
-    return LOGGER.get_all_trades(limit=limit)
+    with get_session() as db:
+        return TradeLogger(db_session=db).get_all_trades(limit=limit)
 
 @st.cache_data(ttl=30)
 def _session_info() -> dict:
@@ -265,13 +280,10 @@ with st.sidebar:
     st.markdown("---")
 
     # Bot status
-    sess       = _session_info()
-    is_open    = sess["market_open"]
-    is_safe    = _news_safe()
-    kill_in_db = DB.execute(
-        text("SELECT kill_switch_triggered FROM daily_summary WHERE date=CURRENT_DATE")
-    ).fetchone()
-    kill_active = bool(kill_in_db and kill_in_db[0])
+    sess        = _session_info()
+    is_open     = sess["market_open"]
+    is_safe     = _news_safe()
+    kill_active = _kill_active()
 
     if kill_active:
         status_label, status_colour = "🛑 HALTED", RED
@@ -766,10 +778,7 @@ with tab4:
 
     today_stats = _today_summary()
     daily_pnl_v = today_stats["total_pnl_usd"]
-    kill_in_db  = DB.execute(
-        text("SELECT kill_switch_triggered FROM daily_summary WHERE date=CURRENT_DATE")
-    ).fetchone()
-    kill_active = bool(kill_in_db and kill_in_db[0])
+    kill_active = _kill_active()
 
     # ── Kill banner if active ─────────────────────────────────
     if kill_active:
@@ -809,12 +818,12 @@ with tab4:
                 st.warning("Are you sure? This halts all trading for today.")
                 yes, no = st.columns(2)
                 if yes.button("✅ Yes, halt now", key="confirm_yes"):
-                    DB.execute(text("""
-                        INSERT INTO daily_summary (date, total_pnl_usd, total_trades, kill_switch_triggered)
-                        VALUES (CURRENT_DATE, 0, 0, TRUE)
-                        ON CONFLICT (date) DO UPDATE SET kill_switch_triggered = TRUE
-                    """))
-                    DB.commit()
+                    with engine.begin() as _conn:
+                        _conn.execute(text("""
+                            INSERT INTO daily_summary (date, total_pnl_usd, total_trades, kill_switch_triggered)
+                            VALUES (CURRENT_DATE, 0, 0, TRUE)
+                            ON CONFLICT (date) DO UPDATE SET kill_switch_triggered = TRUE
+                        """))
                     st.session_state["confirm_stop"] = False
                     st.success("Kill switch activated. Bot will not open new trades today.")
                     st.cache_data.clear()
@@ -830,12 +839,12 @@ with tab4:
     with ec2:
         if kill_active:
             if st.button("▶️ RESUME TRADING", type="secondary", use_container_width=True):
-                DB.execute(text("""
-                    UPDATE daily_summary
-                    SET kill_switch_triggered = FALSE
-                    WHERE date = CURRENT_DATE
-                """))
-                DB.commit()
+                with engine.begin() as _conn:
+                    _conn.execute(text("""
+                        UPDATE daily_summary
+                        SET kill_switch_triggered = FALSE
+                        WHERE date = CURRENT_DATE
+                    """))
                 st.success("Kill switch cleared. Trading will resume on next bot tick.")
                 st.cache_data.clear()
                 st.rerun()
