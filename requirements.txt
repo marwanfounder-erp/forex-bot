@@ -10,5 +10,4 @@ sqlalchemy==2.0.30
 psycopg2-binary==2.9.9
 asyncpg==0.29.0
 plotly==6.7.0
-yfinance==0.2.40
 flask==3.0.3

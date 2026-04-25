@@ -255,17 +255,12 @@ with st.sidebar:
     st.markdown("## 📈 Forex Bot")
     st.markdown("---")
 
-    # Paper mode toggle
-    st.session_state.paper_mode = st.toggle(
-        "📄 Paper Mode",
-        value=st.session_state.paper_mode,
-        help="Strategies run but NO real MT5 orders are placed.",
+    # Paper mode is always active — show permanent banner
+    st.markdown(
+        "<div class='paper-banner'>📄 PAPER TRADING MODE — no real orders</div>",
+        unsafe_allow_html=True,
     )
-    if st.session_state.paper_mode:
-        st.markdown(
-            "<div class='paper-banner'>📄 PAPER MODE — no real orders</div>",
-            unsafe_allow_html=True,
-        )
+    st.session_state.paper_mode = True   # always paper
 
     st.markdown("---")
 
@@ -286,10 +281,8 @@ with st.sidebar:
         status_label, status_colour = "💤 DEAD ZONE", GREY
     elif not is_safe:
         status_label, status_colour = "📰 NEWS PAUSE", ORANGE
-    elif st.session_state.paper_mode:
-        status_label, status_colour = "📄 PAPER MODE", GOLD
     else:
-        status_label, status_colour = "🟢 RUNNING", GREEN
+        status_label, status_colour = "📄 PAPER — RUNNING", GOLD
 
     st.markdown(
         f"<div style='font-size:1.1rem;font-weight:700;color:{status_colour}'>"
@@ -316,10 +309,23 @@ with st.sidebar:
 
     st.markdown("---")
 
-    # Manual balance input (dashboard standalone)
-    st.markdown("**Account**")
-    account_balance = st.number_input(
-        "Balance (USD)", min_value=0.0, value=10_000.0, step=100.0, format="%.2f"
+    # Paper account summary
+    st.markdown("**Paper Account**")
+    _starting = config.PAPER_TRADING["starting_balance"]
+    _all_closed = _all_trades(10_000)
+    _closed_pnl = sum(
+        float(t.get("pnl_usd") or 0)
+        for t in _all_closed
+        if t.get("result") in ("WIN", "LOSS", "BREAKEVEN")
+    )
+    account_balance = _starting + _closed_pnl
+    _return_pct = (_closed_pnl / _starting * 100) if _starting else 0.0
+    _ret_colour = GREEN if _closed_pnl >= 0 else RED
+    st.markdown(
+        f"Starting: **${_starting:,.2f}**<br>"
+        f"Current: **${account_balance:,.2f}**<br>"
+        f"<span style='color:{_ret_colour}'>Return: {_return_pct:+.2f}%</span>",
+        unsafe_allow_html=True,
     )
 
     # Auto-refresh note
@@ -333,11 +339,11 @@ st.markdown(
     "<h2 style='margin-bottom:4px'>EUR/USD Forex Bot — Control Center</h2>",
     unsafe_allow_html=True,
 )
-if st.session_state.paper_mode:
-    st.markdown(
-        "<div class='paper-banner'>📄 PAPER MODE ACTIVE — strategies running, no real orders</div>",
-        unsafe_allow_html=True,
-    )
+st.markdown(
+    "<div class='paper-banner' style='font-size:1.05rem;'>📄 PAPER TRADING MODE — "
+    "live EUR/USD prices, simulated execution, no real money at risk</div>",
+    unsafe_allow_html=True,
+)
 
 # ─────────────────────────────────────────────────────────────
 # ░░ TABS ░░
@@ -364,6 +370,27 @@ with tab1:
 
     # Daily drawdown %
     daily_dd_pct = abs(daily_pnl_val) / account_balance * 100 if daily_pnl_val < 0 else 0.0
+
+    # ── Paper balance row ─────────────────────────────────────
+    _start_bal  = config.PAPER_TRADING["starting_balance"]
+    _all_cl     = _all_trades(10_000)
+    _alltime_pnl = sum(
+        float(t.get("pnl_usd") or 0)
+        for t in _all_cl
+        if t.get("result") in ("WIN", "LOSS", "BREAKEVEN")
+    )
+    _current_bal = _start_bal + _alltime_pnl
+    _ret_pct     = (_alltime_pnl / _start_bal * 100) if _start_bal else 0.0
+    _ret_delta   = "normal" if _alltime_pnl >= 0 else "inverse"
+
+    pb1, pb2, pb3 = st.columns(3)
+    pb1.metric("Starting Balance",  f"${_start_bal:,.2f}")
+    pb2.metric("Current Balance",   f"${_current_bal:,.2f}",
+               delta=f"${_alltime_pnl:+.2f} all-time", delta_color=_ret_delta)
+    pb3.metric("Total Return",      f"{_ret_pct:+.2f}%",
+               delta="paper trading", delta_color="off")
+
+    st.markdown("<hr style='margin:10px 0'>", unsafe_allow_html=True)
 
     # ── 4 metric cards ────────────────────────────────────────
     c1, c2, c3, c4 = st.columns(4)

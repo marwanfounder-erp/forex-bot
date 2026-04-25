@@ -4,14 +4,13 @@ Master bot loop — wires all components together and runs every 60 seconds.
 
 Flags
 -----
-  --dry-run         Run N ticks then exit (default 3). No live orders.
+  --dry-run         Run N ticks then exit (default 3). No orders placed.
   --ticks N         Number of ticks for --dry-run (default 3).
 """
 from __future__ import annotations
 
 import argparse
 import logging
-import platform
 import sys
 import time
 from datetime import date, datetime
@@ -31,23 +30,16 @@ log = logging.getLogger(__name__)
 
 import config
 from core import database, risk_manager
-from core.data_feed       import get_account_balance, get_ohlcv, MT5_AVAILABLE
-from core.session_manager import get_session_info, is_market_open
-from core.news_filter     import NewsFilter
-from core.trade_engine    import TradeEngine
+from core.data_feed        import get_account_balance, get_ohlcv
+from core.session_manager  import get_session_info, is_market_open
+from core.news_filter      import NewsFilter
+from core.trade_engine     import PaperTradeEngine
 from analytics.trade_logger    import TradeLogger
 from analytics.performance     import PerformanceAnalyzer
 from strategies.strategy_router import StrategyRouter
 
-# MT5 — Windows only
-if MT5_AVAILABLE:
-    import MetaTrader5 as mt5
-else:
-    mt5 = None
 
-
-# ── MT5 data feed wrapper ─────────────────────────────────────────────────
-class MT5DataFeed:
+class DataFeed:
     """Thin wrapper so StrategyRouter can call .get_ohlcv(...)."""
     def get_ohlcv(self, symbol, timeframe, bars=200):
         return get_ohlcv(symbol, timeframe, bars)
@@ -55,35 +47,8 @@ class MT5DataFeed:
 
 EST = pytz.timezone("America/New_York")
 
-# ── Performance update counter ────────────────────────────────────────────
 _tick_count = 0
-PERF_UPDATE_EVERY = 5   # ticks (5 × 60s = every 5 minutes)
-
-
-# ═════════════════════════════════════════════════════════════════════════
-# Startup
-# ═════════════════════════════════════════════════════════════════════════
-
-def connect_mt5() -> bool:
-    """Connect to MT5 broker. Returns False on Linux (not available)."""
-    if not MT5_AVAILABLE or mt5 is None:
-        log.info("MT5 not available on %s — running in PAPER MODE", platform.system())
-        return False
-
-    if not mt5.initialize(
-        login    = config.MT5_LOGIN,
-        password = config.MT5_PASSWORD,
-        server   = config.MT5_SERVER,
-    ):
-        log.error("MT5 connection failed: %s", mt5.last_error())
-        return False
-
-    info = mt5.account_info()
-    log.info(
-        "MT5 connected | Account: %s | Balance: %.2f %s",
-        info.login, info.balance, info.currency,
-    )
-    return True
+PERF_UPDATE_EVERY = 5   # ticks (5 × 60 s = every 5 minutes)
 
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -91,11 +56,11 @@ def connect_mt5() -> bool:
 # ═════════════════════════════════════════════════════════════════════════
 
 def tick(
-    engine:      TradeEngine,
+    engine:      PaperTradeEngine,
     news_filter: NewsFilter,
     router:      StrategyRouter,
     perf:        PerformanceAnalyzer,
-    data_feed:   MT5DataFeed,
+    data_feed:   DataFeed,
     db,
     dry_run:     bool = False,
 ) -> None:
@@ -127,7 +92,7 @@ def tick(
         balance = get_account_balance()
     except Exception as exc:
         log.warning("[%s] Cannot get balance: %s", now_est, exc)
-        return
+        balance = config.PAPER_BALANCE
 
     allowed, reason = risk_manager.can_trade(db, balance)
     if not allowed:
@@ -142,22 +107,20 @@ def tick(
         signals = []
 
     # ── 5. Execute signals ────────────────────────────────────────────
-    mode_tag = "[DRY-RUN]" if dry_run else ""
     for sig in signals:
         strategy_name = sig.get("strategy", "unknown")
         if dry_run:
             log.info(
-                "%s WOULD TRADE | %s %s | conf=%.2f | entry=%.5f sl=%.5f tp=%.5f",
-                mode_tag, strategy_name, sig["signal"], sig["confidence"],
+                "[DRY-RUN] WOULD TRADE | %s %s | conf=%.2f | entry=%.5f sl=%.5f tp=%.5f",
+                strategy_name, sig["signal"], sig["confidence"],
                 sig["entry_price"], sig["stop_loss"], sig["take_profit"],
             )
         else:
             result = engine.execute_signal(sig, strategy_name, session)
             if result["success"]:
-                paper = " [PAPER]" if result.get("paper_mode") else ""
                 log.info(
-                    "[%s] ORDER%s | %s %s | ticket=%s | lot=%s | conf=%.2f",
-                    now_est, paper, strategy_name, sig["signal"],
+                    "[%s] [PAPER] ORDER | %s %s | ticket=%s | lot=%s | conf=%.2f",
+                    now_est, strategy_name, sig["signal"],
                     result["ticket"], result.get("lot_size", "?"), sig["confidence"],
                 )
             else:
@@ -167,10 +130,10 @@ def tick(
     if not dry_run:
         newly_closed = engine.monitor_open_trades()
         for t in newly_closed:
-            symbol = "WIN" if t["pnl_usd"] > 0 else "LOSS"
+            outcome = "WIN" if t["pnl_usd"] > 0 else ("BREAKEVEN" if t["pnl_usd"] == 0 else "LOSS")
             log.info(
                 "[%s] CLOSE %s | %s | PnL: $%+.2f (%+.1f pips) | RR: %.2f",
-                now_est, symbol, t["strategy"],
+                now_est, outcome, t["strategy"],
                 t["pnl_usd"], t["pnl_pips"], t["rr_actual"],
             )
 
@@ -184,14 +147,20 @@ def tick(
     # ── 8. Status line ────────────────────────────────────────────────
     open_trades = [] if dry_run else engine.get_open_trades()
     today_stats = perf.get_daily_summary(date.today())
-    pnl_sign    = "+" if today_stats["total_pnl_usd"] >= 0 else ""
 
-    paper_label = " | Mode: PAPER" if engine.paper_mode else " | Mode: LIVE"
+    try:
+        summary  = engine.get_account_summary()
+        balance  = summary["balance"]
+        today_pnl = summary["closed_pnl"]
+    except Exception:
+        balance   = config.PAPER_BALANCE
+        today_pnl = today_stats["total_pnl_usd"]
+
+    pnl_sign = "+" if today_pnl >= 0 else ""
     log.info(
-        "[%s] Session: %-10s | News: safe | Open: %d | Today PnL: %s$%.2f (%d trades)%s",
+        "[%s] Session: %-10s | Open: %d | Today: %s$%.2f | Balance: $%,.2f | Mode: PAPER",
         now_est, session, len(open_trades),
-        pnl_sign, today_stats["total_pnl_usd"], today_stats["total_trades"],
-        paper_label,
+        pnl_sign, today_pnl, balance,
     )
 
 
@@ -200,7 +169,7 @@ def tick(
 # ═════════════════════════════════════════════════════════════════════════
 
 def parse_args():
-    p = argparse.ArgumentParser(description="EUR/USD Forex Bot")
+    p = argparse.ArgumentParser(description="EUR/USD Forex Bot — Paper Trading")
     p.add_argument(
         "--dry-run", action="store_true",
         help="Run N ticks then exit without placing orders",
@@ -216,7 +185,8 @@ def main() -> None:
     args = parse_args()
 
     log.info("=" * 62)
-    log.info("  EUR/USD Forex Bot — Starting up")
+    log.info("  EUR/USD Forex Bot — Paper Trading Mode")
+    log.info("  Starting balance: $%.2f", config.PAPER_BALANCE)
     if args.dry_run:
         log.info("  MODE: DRY-RUN (%d ticks)", args.ticks)
     log.info("=" * 62)
@@ -225,26 +195,22 @@ def main() -> None:
     database.init_db()
     log.info("[DB] Neon DB ready")
 
-    # Connect MT5 (no-op on Linux — returns False, paper mode activates)
-    live_mt5 = connect_mt5()
-
     # Build shared components
-    data_feed   = MT5DataFeed()
+    data_feed   = DataFeed()
     db          = database.get_session()
     news_filter = NewsFilter()
     router      = StrategyRouter(data_feed=data_feed)
     perf        = PerformanceAnalyzer(db_session=db)
-    engine      = TradeEngine(
+    engine      = PaperTradeEngine(
         data_feed    = data_feed,
         risk_manager = risk_manager,
         db_session   = db,
-        paper_mode   = args.dry_run or not live_mt5,
     )
 
     log.info("[BOT] News: %s", news_filter.status_string())
     sess = get_session_info()
     log.info("[BOT] Session: %s | Market open: %s", sess["label"], sess["market_open"])
-    log.info("[BOT] Paper mode: %s", engine.paper_mode)
+    log.info("[BOT] Mode: PAPER | Balance: $%.2f", config.PAPER_BALANCE)
 
     if args.dry_run:
         log.info("[BOT] Running %d dry-run ticks then exiting\n", args.ticks)
@@ -273,10 +239,8 @@ def main() -> None:
         log.info("\n[BOT] Stopped by user.")
     finally:
         engine.close_all_trades("bot_shutdown")
-        if live_mt5 and mt5:
-            mt5.shutdown()
         db.close()
-        log.info("[MT5] Connection closed.")
+        log.info("[BOT] Shutdown complete.")
 
 
 if __name__ == "__main__":

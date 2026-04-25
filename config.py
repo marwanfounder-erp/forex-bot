@@ -46,16 +46,10 @@ RISK = {
 }
 
 # ---------------------------------------------------------------------------
-# MT5 credentials (loaded from .env)
-# ---------------------------------------------------------------------------
-MT5_LOGIN    = int(os.getenv("MT5_LOGIN") or "0")
-MT5_PASSWORD = os.getenv("MT5_PASSWORD", "")
-MT5_SERVER   = os.getenv("MT5_SERVER", "")
-
-# ---------------------------------------------------------------------------
 # External API keys
 # ---------------------------------------------------------------------------
-NEWS_API_KEY = os.getenv("NEWS_API_KEY", "")
+NEWS_API_KEY          = os.getenv("NEWS_API_KEY", "")
+ALPHA_VANTAGE_API_KEY = os.getenv("ALPHA_VANTAGE_API_KEY", "")
 
 # ---------------------------------------------------------------------------
 # Database (Neon PostgreSQL)
@@ -63,9 +57,16 @@ NEWS_API_KEY = os.getenv("NEWS_API_KEY", "")
 NEON_DATABASE_URL = os.getenv("NEON_DATABASE_URL", "")
 
 # ---------------------------------------------------------------------------
-# Paper trading balance (used on Linux/Railway when MT5 is unavailable)
+# Paper trading (always enabled — no MT5 required)
 # ---------------------------------------------------------------------------
 PAPER_BALANCE = float(os.getenv("PAPER_BALANCE", "10000.0"))
+PAPER_MODE    = os.getenv("PAPER_MODE", "true").lower() == "true"
+
+PAPER_TRADING = {
+    "enabled":          True,
+    "starting_balance": PAPER_BALANCE,
+    "currency":         "USD",
+}
 
 # ---------------------------------------------------------------------------
 # Session windows (EST hour ranges, inclusive start / exclusive end)

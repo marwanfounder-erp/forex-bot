@@ -128,7 +128,6 @@ class LondonBreakout(BaseStrategy):
         if self.data_feed is None:
             return None
         try:
-            import MetaTrader5 as mt5
             return self.data_feed.get_ohlcv("EURUSD", "M15", bars=60)
         except Exception:
             # In test mode data_feed is a DataFrame directly
