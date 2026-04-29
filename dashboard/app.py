@@ -745,9 +745,11 @@ with tab3:
         if "entry_time" in jdf.columns:
             jdf["_date"] = pd.to_datetime(
                 jdf["entry_time"], utc=True, errors="coerce"
-            ).dt.date
+            ).dt.normalize()
+            ts_from = pd.Timestamp(date_from, tz="UTC")
+            ts_to   = pd.Timestamp(date_to,   tz="UTC") + pd.Timedelta(days=1)
             jdf = jdf[
-                (jdf["_date"] >= date_from) & (jdf["_date"] <= date_to)
+                (jdf["_date"] >= ts_from) & (jdf["_date"] < ts_to)
             ].drop(columns=["_date"])
 
         # ── Summary bar ───────────────────────────────────────
