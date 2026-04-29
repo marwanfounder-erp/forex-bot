@@ -231,6 +231,44 @@ def _result_badge(result: str) -> str:
     cls = {"WIN": "win", "LOSS": "loss", "OPEN": "open"}.get(result, "")
     return f"<span class='{cls}'>{result}</span>"
 
+def _fmt_duration(entry_time) -> str:
+    if entry_time is None:
+        return "—"
+    try:
+        et = pd.to_datetime(entry_time, utc=True)
+        delta = datetime.now(timezone.utc) - et.to_pydatetime()
+        h, rem = divmod(int(delta.total_seconds()), 3600)
+        m = rem // 60
+        return f"{h}h {m}m" if h else f"{m}m"
+    except Exception:
+        return "—"
+
+def _fmt_time(t) -> str:
+    if t is None: return "—"
+    try:
+        return pd.to_datetime(t, utc=True).strftime("%H:%M")
+    except Exception:
+        return "—"
+
+def _row_bg(result: str) -> str:
+    return {"WIN": "#0D2010", "LOSS": "#200D0D", "OPEN": "#1E1C0A"}.get(result, "")
+
+def _is_today(t) -> bool:
+    if t is None: return False
+    try:
+        return pd.to_datetime(t, utc=True).date() == date.today()
+    except Exception:
+        return False
+
+def _is_this_week(t) -> bool:
+    if t is None: return False
+    try:
+        dt = pd.to_datetime(t, utc=True).date()
+        today = date.today()
+        return (today - dt).days < 7
+    except Exception:
+        return False
+
 def _pct_bar(value: float, limit: float) -> None:
     """Draw a coloured progress bar for risk meters."""
     pct = min(value / limit, 1.0) if limit > 0 else 0.0
@@ -956,48 +994,6 @@ with tab4:
     week_dd_all  = abs(week_pnl_all) / account_balance * 100 if week_pnl_all < 0 else 0.0
     _pct_bar(week_dd_all, config.RISK["max_weekly_loss_pct"])
 
-
-# ─────────────────────────────────────────────────────────────
-# Helper functions (defined after tabs so they can reference
-# module-level constants; Streamlit re-executes top to bottom)
-# ─────────────────────────────────────────────────────────────
-def _fmt_duration(entry_time) -> str:
-    if entry_time is None:
-        return "—"
-    try:
-        et = pd.to_datetime(entry_time, utc=True)
-        delta = datetime.now(timezone.utc) - et.to_pydatetime()
-        h, rem = divmod(int(delta.total_seconds()), 3600)
-        m = rem // 60
-        return f"{h}h {m}m" if h else f"{m}m"
-    except Exception:
-        return "—"
-
-def _fmt_time(t) -> str:
-    if t is None: return "—"
-    try:
-        return pd.to_datetime(t, utc=True).strftime("%H:%M")
-    except Exception:
-        return "—"
-
-def _row_bg(result: str) -> str:
-    return {"WIN": "#0D2010", "LOSS": "#200D0D", "OPEN": "#1E1C0A"}.get(result, "")
-
-def _is_today(t) -> bool:
-    if t is None: return False
-    try:
-        return pd.to_datetime(t, utc=True).date() == date.today()
-    except Exception:
-        return False
-
-def _is_this_week(t) -> bool:
-    if t is None: return False
-    try:
-        dt = pd.to_datetime(t, utc=True).date()
-        today = date.today()
-        return (today - dt).days < 7
-    except Exception:
-        return False
 
 def _render_recommendations(comparison: list[dict]) -> None:
     if not comparison:
