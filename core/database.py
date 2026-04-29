@@ -109,14 +109,44 @@ class DailySummary(Base):
 # ---------------------------------------------------------------------------
 # Public helpers
 # ---------------------------------------------------------------------------
+def migrate_db() -> None:
+    """Add any missing columns to existing tables (idempotent)."""
+    migrations = [
+        "ALTER TABLE trades ADD COLUMN IF NOT EXISTS mt5_ticket INTEGER",
+        "ALTER TABLE trades ADD COLUMN IF NOT EXISTS strategy VARCHAR",
+        "ALTER TABLE trades ADD COLUMN IF NOT EXISTS symbol VARCHAR",
+        "ALTER TABLE trades ADD COLUMN IF NOT EXISTS direction VARCHAR",
+        "ALTER TABLE trades ADD COLUMN IF NOT EXISTS entry_price FLOAT",
+        "ALTER TABLE trades ADD COLUMN IF NOT EXISTS exit_price FLOAT",
+        "ALTER TABLE trades ADD COLUMN IF NOT EXISTS stop_loss FLOAT",
+        "ALTER TABLE trades ADD COLUMN IF NOT EXISTS take_profit FLOAT",
+        "ALTER TABLE trades ADD COLUMN IF NOT EXISTS lot_size FLOAT",
+        "ALTER TABLE trades ADD COLUMN IF NOT EXISTS result VARCHAR DEFAULT 'OPEN'",
+        "ALTER TABLE trades ADD COLUMN IF NOT EXISTS pnl_pips FLOAT DEFAULT 0",
+        "ALTER TABLE trades ADD COLUMN IF NOT EXISTS pnl_usd FLOAT DEFAULT 0",
+        "ALTER TABLE trades ADD COLUMN IF NOT EXISTS risk_reward_actual FLOAT DEFAULT 0",
+        "ALTER TABLE trades ADD COLUMN IF NOT EXISTS session VARCHAR",
+        "ALTER TABLE trades ADD COLUMN IF NOT EXISTS confidence_score FLOAT DEFAULT 0",
+        "ALTER TABLE trades ADD COLUMN IF NOT EXISTS entry_time TIMESTAMP",
+        "ALTER TABLE trades ADD COLUMN IF NOT EXISTS exit_time TIMESTAMP",
+        "ALTER TABLE trades ADD COLUMN IF NOT EXISTS notes TEXT",
+    ]
+
+    with engine.connect() as conn:
+        for sql in migrations:
+            try:
+                conn.execute(text(sql))
+                conn.commit()
+            except Exception as e:
+                conn.rollback()
+                print(f"Migration skipped: {e}")
+
+
 def init_db() -> None:
     """Create all tables if they don't already exist, then apply any column migrations."""
     Base.metadata.create_all(engine)
-    # Idempotent column migrations for tables that already existed
-    with engine.begin() as conn:
-        conn.execute(text(
-            "ALTER TABLE trades ADD COLUMN IF NOT EXISTS mt5_ticket INTEGER"
-        ))
+    migrate_db()
+    print("DB ready")
 
 
 def get_session() -> Session:
