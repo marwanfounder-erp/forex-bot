@@ -628,6 +628,8 @@ with tab2:
     # ── Comparison table ──────────────────────────────────────
     comparison = _comparison()
 
+    comparison = [s for s in comparison if s.get("strategy") is not None]
+
     if comparison:
         comp_df = pd.DataFrame(comparison)
         comp_df["status"] = comp_df["strategy"].apply(
@@ -707,7 +709,7 @@ with tab2:
         _render_recommendations(comparison)
 
     else:
-        st.info("No closed trades yet. Recommendations will appear after the first trade closes.")
+        st.info("No trades yet. The bot will start paper trading when markets open — check back after the London session opens.")
 
 
 # ═════════════════════════════════════════════════════════════
@@ -806,7 +808,7 @@ with tab3:
             mime      = "text/csv",
         )
     else:
-        st.info("No trades match the selected filters.")
+        st.info("No trades recorded yet. First trade will appear here when the London session opens.")
 
 
 # ═════════════════════════════════════════════════════════════
